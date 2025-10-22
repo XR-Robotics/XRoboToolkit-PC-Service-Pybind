@@ -35,7 +35,10 @@ conda install -c conda-forge pybind11
 pip uninstall -y xrobotoolkit_sdk
 python setup.py install
 ```
-
+### Linux Ubuntu 22.04 arm64 version (Nvidia orin supported)
+```
+bash setup_orin.sh
+```
 ### Windows
 
 **Ensure pybind11 is installed before running the following command.**
