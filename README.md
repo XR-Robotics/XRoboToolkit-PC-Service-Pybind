@@ -121,7 +121,7 @@ print(f"Right Hand isActive: {right_hand_is_active}")
 xrt.close()
 ```
 
-**4. Get whole body motion tracking**
+**4. Get whole body motion tracking （please refer to this example when check Full Body tracking mode in UNITY app）**
 ```python
 import xrobotoolkit_sdk as xrt
 
@@ -162,7 +162,7 @@ else:
 xrt.close()
 ```
 
-**Body Joint Indices (24 joints total):**
+**Body Joint Indices (similar to SMPL, 24 joints total):**
 - 0: Pelvis, 1: Left Hip, 2: Right Hip, 3: Spine1, 4: Left Knee, 5: Right Knee
 - 6: Spine2, 7: Left Ankle, 8: Right Ankle, 9: Spine3, 10: Left Foot, 11: Right Foot
 - 12: Neck, 13: Left Collar, 14: Right Collar, 15: Head, 16: Left Shoulder, 17: Right Shoulder
