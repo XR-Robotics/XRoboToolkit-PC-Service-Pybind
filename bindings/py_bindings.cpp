@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>
 #include "PXREARobotSDK.h"
 
+
 using json = nlohmann::json;
 
 std::array<double, 7> LeftControllerPose;
@@ -65,6 +66,8 @@ std::mutex rightHandMutex;
 std::mutex bodyMutex;  // Mutex for body tracking data
 std::mutex motionMutex;
 
+
+
 std::array<double, 7> stringToPoseArray(const std::string& poseStr) {
     std::array<double, 7> result{0};
     std::stringstream ss(poseStr);
@@ -108,6 +111,8 @@ void OnPXREAClientCallback(void* context, PXREAClientCallbackType type, int stat
         break;
     case PXREADeviceStateJson:
         auto& dsj = *((PXREADevStateJson*)userData);
+        
+
         try {
             json data = json::parse(dsj.stateJson);
             if (data.contains("value")) {
@@ -472,6 +477,23 @@ int64_t getMotionTimeStampNs() {
     return MotionTimeStampNs;
 }
 
+int DeviceControlJsonWrapper(const std::string& dev_id, const std::string& json_str) {
+    const int rc = PXREADeviceControlJson(dev_id.c_str(), json_str.c_str());
+    if (rc != 0) {
+        throw std::runtime_error("device_control_json failed");
+    }
+    return rc; // 0
+}
+
+int SendBytesToDeviceWrapper(const std::string& dev_id, pybind11::bytes blob) {
+    std::string s = blob;  // copy Python bytes to std::string
+    const int rc = PXREASendBytesToDevice(dev_id.c_str(), s.data(), static_cast<unsigned>(s.size()));
+    if (rc != 0) {
+        throw std::runtime_error("send_bytes_to_device failed");
+    }
+    return rc; // 0
+}
+
 
 PYBIND11_MODULE(xrobotoolkit_sdk, m) {
     m.def("init", &init, "Initialize the PXREARobot SDK.");
@@ -514,6 +536,11 @@ PYBIND11_MODULE(xrobotoolkit_sdk, m) {
     m.def("get_motion_tracker_acceleration", &getMotionTrackerAcceleration, "Get the motion tracker acceleration data (3 trackers, 6 values each: ax,ay,az,wax,way,waz).");
     m.def("get_motion_tracker_serial_numbers", &getMotionTrackerSerialNumbers, "Get the serial numbers of the motion trackers.");
     m.def("get_motion_timestamp_ns", &getMotionTimeStampNs, "Get the motion data timestamp in nanoseconds.");
+    
+
+    // send json bytes functions
+    m.def("device_control_json", &DeviceControlJsonWrapper, "Send a JSON control command to a device");
+    m.def("send_bytes_to_device", &SendBytesToDeviceWrapper, "Send raw bytes to a device");
     
     m.doc() = "Python bindings for PXREARobot SDK using pybind11.";
 }
