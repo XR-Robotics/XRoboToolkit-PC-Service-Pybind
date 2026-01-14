@@ -39,16 +39,15 @@ if(UNIX)
     target_include_directories(xrobotoolkit_sdk PUBLIC
         ${PROJECT_SOURCE_DIR}/include
     )
-    target_link_directories(xrobotoolkit_sdk PUBLIC ${PROJECT_SOURCE_DIR}/lib)
+    target_link_directories(xrobotoolkit_sdk PUBLIC ${PROJECT_SOURCE_DIR}/lib /opt/apps/roboticsservice/SDK/x64)
   endif()
   target_link_libraries(xrobotoolkit_sdk PUBLIC
       PXREARobotSDK
   )
+  set_target_properties(xrobotoolkit_sdk PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE INSTALL_RPATH /opt/apps/roboticsservice/SDK/x64)
 endif()
 
 # Install the Python module
 install(TARGETS xrobotoolkit_sdk
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} # Installs to <prefix>/lib
-                                                # You might want a Python-specific path like:
-                                                # DESTINATION lib/python${Python_VERSION_MAJOR}.${Python_VERSION_MINOR}/site-packages
+    LIBRARY DESTINATION . # Installs to wheel root for uv/pip
 )
