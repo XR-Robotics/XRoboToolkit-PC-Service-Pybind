@@ -10,9 +10,9 @@ This project provides Python bindings for the XRoboToolkit PC Service SDK, enabl
 
 The project consists of:
 
-- **Core C++ Bindings** (`bindings/py_bindings.cpp`): Pybind11-based C++ module that wraps the PXREARobotSDK
+- **Core C++ Bindings** (`bindings/py_bindings.cpp`): C++ module written against the CPython Limited API (no pybind11, which cannot target it) that wraps the PXREARobotSDK
 - **SDK Integration**: Uses the XRoboToolkit-PC-Service SDK (cloned from external repository)
-- **Build System**: CMake-based build with Python setuptools integration
+- **Build System**: CMake-based build driven by scikit-build-core, producing abi3 wheels
 - **Multi-platform Support**: Linux (x86_64/aarch64) and Windows
 
 Key components:
@@ -30,15 +30,24 @@ Building the extension is only possible on Linux and Windows; macOS is
 unsupported (no vendor binaries exist).
 
 ```bash
-# Create .venv (Python from .python-version), build and install the package
+# Create .venv (any Python >= 3.10; choose with --python 3.X), build and install the package
 uv sync
 
 # Run an example inside the project venv
 uv run examples/example.py
 
-# Build sdist + wheel
+# Build sdist + wheel (cp310-abi3: installs on any CPython >= 3.10)
 uv build
 ```
+
+The extension targets the CPython stable ABI (`wheel.py-api = "cp310"` in
+`pyproject.toml`), so one wheel per platform serves every CPython >= 3.10
+(not free-threaded builds) regardless of the Python that built it. Keep
+`py_bindings.cpp` within the 3.10 Limited API and check built wheels with
+`uvx abi3audit --strict dist/*.whl`. Do not use `PyArg_ParseTuple` `#`
+formats (`s#`, `y#`, ...): built against Python >= 3.13 headers they raise
+`SystemError` (PY_SSIZE_T_CLEAN) on Python 3.10-3.12, which abi3audit does not
+detect.
 
 Release wheels are built by cibuildwheel in `.github/workflows/wheels.yml`
 (manylinux_2_34 for both Linux arches, dictated by the vendored libraries'
@@ -71,8 +80,8 @@ The SDK uses a callback-based architecture:
 ## Dependencies
 
 ### Required (build time)
-- CMake >= 3.18 and a C++17 compiler
-- pybind11 and scikit-build-core (fetched automatically by the build backend)
+- CMake >= 3.26 (FindPython stable-ABI support; downloaded automatically if missing) and a C++17 compiler
+- scikit-build-core (fetched automatically by uv/pip)
 
 ### Platform-specific Libraries (vendored in `vendor/`)
 - Linux: `libPXREARobotSDK.so` (x86_64 and aarch64 variants)

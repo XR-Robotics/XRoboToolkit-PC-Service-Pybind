@@ -1,5 +1,5 @@
 [build-system]
-requires = ["scikit-build-core>=0.11", "pybind11>=2.13"]
+requires = ["scikit-build-core>=0.11"]
 build-backend = "scikit_build_core.build"
 
 [project]
@@ -26,6 +26,9 @@ Upstream = "https://github.com/XR-Robotics/XRoboToolkit-PC-Service"
 [tool.scikit-build]
 minimum-version = "build-system.requires"
 wheel.packages = ["src/xrobotoolkit_sdk"]
+# Build against the CPython stable ABI: one cp310-abi3 wheel installs on every
+# CPython >= 3.10, whichever version built it. Keep in sync with requires-python.
+wheel.py-api = "cp310"
 
 # Rebuild the extension when any of these change (uv caches builds otherwise).
 [tool.uv]
@@ -38,8 +41,9 @@ cache-keys = [
 
 [tool.cibuildwheel]
 archs = ["auto64"]
-# Skip musl (no vendored musl lib) and free-threaded CPython (pybind11
-# free-threading support is experimental; Windows link also fails on it).
+# The cp310 abi3 wheel is built once; cibuildwheel reuses it for (and tests it
+# on) every later CPython. Skip musl (no vendored musl lib) and free-threaded
+# CPython (it cannot load abi3 wheels).
 skip = "*-musllinux* cp3*t-*"
 test-command = 'python -c "import xrobotoolkit_sdk"'
 

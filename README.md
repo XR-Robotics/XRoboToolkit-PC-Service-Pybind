@@ -28,7 +28,8 @@ If you do not have [uv](https://docs.astral.sh/uv/) installed, run:
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-Then (requires CMake and a C++17 compiler):
+Then (requires a C++17 compiler; CMake >= 3.26 is downloaded automatically if
+not installed):
 
 ```bash
 git clone https://github.com/XR-Robotics/XRoboToolkit-PC-Service-Pybind.git
@@ -36,12 +37,16 @@ cd XRoboToolkit-PC-Service-Pybind
 uv sync
 ```
 
-`uv sync` creates `.venv/` with the Python version pinned in `.python-version`,
-builds the extension, and installs the package into it. Run scripts with e.g.
-`uv run examples/example.py`.
+`uv sync` creates `.venv/` with any available Python >= 3.10 (pick one with
+e.g. `uv sync --python 3.12`), builds the extension, and installs the package
+into it. Run scripts with e.g. `uv run examples/example.py`.
 
-To build distributable artifacts locally: `uv build` (wheels for Linux/Windows
-are also built in CI via cibuildwheel, see `.github/workflows/wheels.yml`).
+To build distributable artifacts locally: `uv build`. The extension is built
+against the CPython stable ABI, so the wheel (e.g.
+`xrobotoolkit_sdk-1.1.0-cp310-abi3-win_amd64.whl`) installs on any CPython
+>= 3.10 for the same OS and architecture, whichever Python version built it.
+Wheels for Linux/Windows are also built in CI via cibuildwheel, see
+`.github/workflows/wheels.yml`.
 
 ## Using the Python Bindings
 
