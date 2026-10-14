@@ -11,11 +11,14 @@
 #include <type_traits>
 #include <vector>
 #include <array>
+#include <vector>
+#include <string>
 #include <nlohmann/json.hpp>
 #include "PXREARobotSDK.h"
 
 
 using json = nlohmann::json;
+namespace py = pybind11;
 
 std::array<double, 7> LeftControllerPose;
 std::array<double, 7> RightControllerPose;
@@ -35,6 +38,25 @@ std::array<std::array<double, 6>, 24> BodyJointsAcceleration;  // Acceleration a
 std::array<int64_t, 24> BodyJointsTimestamp;  // IMU timestamp for each joint
 int64_t BodyTimeStampNs = 0;  // Body data timestamp
 bool BodyDataAvailable = false;  // Flag to indicate if body data is available
+
+// Meta IOBT body tracking ("BodyMeta"), kept entirely separate from the PICO "Body" path above.
+// Two reasons it cannot reuse it: the arrays there are fixed at 24 and would silently drop 46 of
+// the 70 UpperBody joints, and Meta reports no velocity/acceleration at all (BodyJointLocation
+// carries only LocationFlags and Pose, unlike PICO's IMU trackers).
+//
+// std::vector rather than std::array: the joint count is whatever the client sends, so adding
+// joints upstream -- or switching to the 84-joint FullBody skeleton -- needs no change here.
+std::vector<int> BodyMetaJointIds;                       // Meta joint id, see get_body_meta_joint_ids
+std::vector<std::array<double, 7>> BodyMetaJointsPose;   // x,y,z,qx,qy,qz,qw per joint
+std::vector<bool> BodyMetaPositionValid;                 // per joint, false when occluded
+std::vector<bool> BodyMetaOrientationValid;              // per joint, fails independently of above
+std::array<double, 7> BodyMetaTrackingSpace{0, 0, 0, 0, 0, 0, 1};  // tracking space in world frame
+std::string BodyMetaJointSet;                            // "UpperBody" / "FullBody"
+std::string BodyMetaFidelity;                            // "High" = camera-measured IOBT
+std::string BodyMetaCalibration;                         // "Valid" once skeleton scale settles
+double BodyMetaConfidence = 0.0;
+int64_t BodyMetaTimeStampNs = 0;
+bool BodyMetaDataAvailable = false;
 
 std::array<std::array<double, 7>, 3> MotionTrackerPose;  // Position and rotation for each joint
 std::array<std::array<double, 6>, 3> MotionTrackerVelocity;  // Velocity and angular velocity for each joint
@@ -69,6 +91,7 @@ std::mutex timestampMutex;
 std::mutex leftHandMutex;
 std::mutex rightHandMutex;
 std::mutex bodyMutex;  // Mutex for body tracking data
+std::mutex bodyMetaMutex;  // Mutex for Meta IOBT body tracking data
 std::mutex motionMutex;
 
 
@@ -225,6 +248,79 @@ void OnPXREAClientCallback(void* context, PXREAClientCallbackType type, int stat
                             }
                             
                             BodyDataAvailable = true;
+                        }
+                    }
+                }
+                // Parse BodyMeta: Meta IOBT upper-body joints from the Quest client. Independent
+                // of the "Body" branch above -- neither reads the other's key or storage.
+                if (value.contains("BodyMeta")) {
+                    auto& bodyMeta = value["BodyMeta"];
+                    {
+                        std::lock_guard<std::mutex> lock(bodyMetaMutex);
+
+                        // Unlike PICO, the timestamp is at the top level of the packet, not inside
+                        // the body object: all sources in a frame share one, which is what makes
+                        // headset pose and joints alignable.
+                        if (value.contains("timeStampNs")) {
+                            BodyMetaTimeStampNs = value["timeStampNs"].get<int64_t>();
+                        }
+
+                        // The headset's mount detection gates tracking, so once it leaves the head
+                        // (neck included) isActive goes 0 while "joints" still holds the last frame
+                        // -- the client reuses its JSON objects and does not clear them. Reporting
+                        // unavailable is the whole point of the flag; a stale frame read as live is
+                        // worse than no frame, because nothing downstream can tell it is stale.
+                        const bool isActive = bodyMeta.contains("isActive") &&
+                                              bodyMeta["isActive"].get<int>() != 0;
+                        if (!isActive) {
+                            BodyMetaDataAvailable = false;
+                        } else if (bodyMeta.contains("joints") && bodyMeta["joints"].is_array()) {
+                            if (bodyMeta.contains("jointSet")) {
+                                BodyMetaJointSet = bodyMeta["jointSet"].get<std::string>();
+                            }
+                            if (bodyMeta.contains("fidelity")) {
+                                BodyMetaFidelity = bodyMeta["fidelity"].get<std::string>();
+                            }
+                            if (bodyMeta.contains("calib")) {
+                                BodyMetaCalibration = bodyMeta["calib"].get<std::string>();
+                            }
+                            if (bodyMeta.contains("confidence")) {
+                                BodyMetaConfidence = bodyMeta["confidence"].get<double>();
+                            }
+                            if (bodyMeta.contains("trackingSpace")) {
+                                BodyMetaTrackingSpace = stringToPoseArray(
+                                    bodyMeta["trackingSpace"].get<std::string>());
+                            }
+
+                            auto& joints = bodyMeta["joints"];
+                            const size_t jointCount = joints.size();
+
+                            // Resized, never truncated: the count is data, not a constant.
+                            BodyMetaJointIds.resize(jointCount);
+                            BodyMetaJointsPose.resize(jointCount);
+                            BodyMetaPositionValid.resize(jointCount);
+                            BodyMetaOrientationValid.resize(jointCount);
+
+                            for (size_t i = 0; i < jointCount; i++) {
+                                auto& joint = joints[i];
+
+                                BodyMetaJointIds[i] = joint.contains("id")
+                                    ? joint["id"].get<int>() : static_cast<int>(i);
+
+                                if (joint.contains("p")) {
+                                    BodyMetaJointsPose[i] =
+                                        stringToPoseArray(joint["p"].get<std::string>());
+                                }
+
+                                // Occluded joints keep their last pose, so validity has to travel
+                                // with the data for consumers to know what to trust.
+                                BodyMetaPositionValid[i] =
+                                    joint.contains("v") && joint["v"].get<int>() != 0;
+                                BodyMetaOrientationValid[i] =
+                                    joint.contains("vr") && joint["vr"].get<int>() != 0;
+                            }
+
+                            BodyMetaDataAvailable = true;
                         }
                     }
                 }
@@ -434,6 +530,62 @@ std::array<int64_t, 24> getBodyJointsTimestamp() {
 int64_t getBodyTimeStampNs() {
     std::lock_guard<std::mutex> lock(bodyMutex);
     return BodyTimeStampNs;
+}
+
+// Meta IOBT body tracking functions. Named get_body_meta_* alongside the get_body_* above: the
+// two are parallel, independent sources, and neither name is taken from the other.
+//
+// There is deliberately no get_body_meta_joints_velocity/_acceleration/_timestamp counterpart:
+// Meta's BodyJointLocation has no such fields, and returning zeros under a familiar name would be
+// worse than the function not existing.
+bool isBodyMetaAvailable() {
+    std::lock_guard<std::mutex> lock(bodyMetaMutex);
+    return BodyMetaDataAvailable;
+}
+
+std::vector<std::array<double, 7>> getBodyMetaJointsPose() {
+    std::lock_guard<std::mutex> lock(bodyMetaMutex);
+    return BodyMetaJointsPose;
+}
+
+std::vector<int> getBodyMetaJointIds() {
+    std::lock_guard<std::mutex> lock(bodyMetaMutex);
+    return BodyMetaJointIds;
+}
+
+std::vector<bool> getBodyMetaPositionValid() {
+    std::lock_guard<std::mutex> lock(bodyMetaMutex);
+    return BodyMetaPositionValid;
+}
+
+std::vector<bool> getBodyMetaOrientationValid() {
+    std::lock_guard<std::mutex> lock(bodyMetaMutex);
+    return BodyMetaOrientationValid;
+}
+
+std::array<double, 7> getBodyMetaTrackingSpace() {
+    std::lock_guard<std::mutex> lock(bodyMetaMutex);
+    return BodyMetaTrackingSpace;
+}
+
+int64_t getBodyMetaTimeStampNs() {
+    std::lock_guard<std::mutex> lock(bodyMetaMutex);
+    return BodyMetaTimeStampNs;
+}
+
+// Grouped into one dict rather than six getters: these are read together when deciding whether a
+// frame is trustworthy, and each would otherwise take its own lock.
+py::dict getBodyMetaInfo() {
+    std::lock_guard<std::mutex> lock(bodyMetaMutex);
+    py::dict info;
+    info["available"] = BodyMetaDataAvailable;
+    info["count"] = BodyMetaJointsPose.size();
+    info["jointSet"] = BodyMetaJointSet;
+    info["fidelity"] = BodyMetaFidelity;
+    info["calib"] = BodyMetaCalibration;
+    info["confidence"] = BodyMetaConfidence;
+    info["timeStampNs"] = BodyMetaTimeStampNs;
+    return info;
 }
 
 int numMotionDataAvailable() {
@@ -661,6 +813,37 @@ PyMethodDef kMethods[] = {
     XRT_FUNCTION("get_body_joints_acceleration", getBodyJointsAcceleration, "list[list[float]]", "Get the body joints acceleration data (24 joints, 6 values each: ax,ay,az,wax,way,waz)."),
     XRT_FUNCTION("get_body_joints_timestamp", getBodyJointsTimestamp, "list[int]", "Get the body joints IMU timestamp data (24 joints)."),
     XRT_FUNCTION("get_body_timestamp_ns", getBodyTimeStampNs, "int", "Get the body data timestamp in nanoseconds."),
+
+    // Meta IOBT body tracking (Quest). Parallel to the get_body_* group above and independent of
+    // it: these read the "BodyMeta" key, those read "Body". Joint count is not fixed (70 for the
+    // UpperBody skeleton) and every joint is camera-measured.
+    m.def("is_body_meta_available", &isBodyMetaAvailable,
+          "Check if Meta IOBT body data is available. Call this before reading anything else: it "
+          "goes False whenever the headset leaves the head, neck included, and the joint arrays "
+          "then hold stale values that look perfectly valid.");
+    m.def("get_body_meta_joints_pose", &getBodyMetaJointsPose,
+          "Get Meta IOBT joint poses, (N, 7): x,y,z,qx,qy,qz,qw. Coordinates are TRACKING-SPACE "
+          "local, so they describe posture only -- combine with get_body_meta_tracking_space() to "
+          "recover where the operator is standing.");
+    m.def("get_body_meta_joint_ids", &getBodyMetaJointIds,
+          "Get Meta IOBT joint ids, (N,). Index into Meta's BodyJointId enum; read together with "
+          "get_body_meta_info()['jointSet'], since UpperBody and FullBody number joints "
+          "differently.");
+    m.def("get_body_meta_position_valid", &getBodyMetaPositionValid,
+          "Get per-joint position validity, (N,). False under occlusion, where the joint keeps its "
+          "last position.");
+    m.def("get_body_meta_orientation_valid", &getBodyMetaOrientationValid,
+          "Get per-joint orientation validity, (N,). Fails independently of position validity.");
+    m.def("get_body_meta_tracking_space", &getBodyMetaTrackingSpace,
+          "Get the tracking space pose in world coordinates, (7,). Required to reconstruct root "
+          "locomotion: joint coordinates are local to this space.");
+    m.def("get_body_meta_timestamp_ns", &getBodyMetaTimeStampNs,
+          "Get the Meta IOBT data timestamp in nanoseconds. Shared with all other sources in the "
+          "same packet, so poses across sources are directly comparable.");
+    m.def("get_body_meta_info", &getBodyMetaInfo,
+          "Get data-quality metadata: available, count, jointSet, fidelity, calib, confidence, "
+          "timeStampNs. Gate on calib == 'Valid' (skeleton scale is still settling before that) "
+          "and fidelity == 'High' (Low is IK inference, not camera-measured).");
 
     // Motion tracker functions
     XRT_FUNCTION("num_motion_data_available", numMotionDataAvailable, "int", "Check if motion tracker data is available."),
