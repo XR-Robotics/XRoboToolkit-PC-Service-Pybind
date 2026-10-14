@@ -38,6 +38,10 @@ uv run examples/example.py
 
 # Build sdist + wheel (cp310-abi3: installs on any CPython >= 3.10)
 uv build
+
+# Check dist/ and upload it to PyPI (needs UV_PUBLISH_TOKEN; --test targets
+# TestPyPI, --dry-run only runs the checks)
+uv run scripts/publish.py
 ```
 
 The extension targets the CPython stable ABI (`wheel.py-api = "cp310"` in
