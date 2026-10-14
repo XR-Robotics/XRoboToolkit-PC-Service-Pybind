@@ -12,7 +12,7 @@ SDK download or build is needed.
 
 ## Installation
 
-### From PyPI (once published)
+### From PyPI
 
 ```bash
 uv add xrobotoolkit-sdk
