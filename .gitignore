@@ -201,9 +201,9 @@ Thumbs.db
 *.egg-info/
 .vscode/
 
-include/
-lib/
-
 tmp/
 
 *.pkl
+
+# Vendored prebuilt SDK binaries are intentionally tracked
+!vendor/**

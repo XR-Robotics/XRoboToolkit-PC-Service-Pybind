@@ -4,48 +4,49 @@ This project provides a python interface to extract XR state using XRoboToolkit-
 
 ## Requirements
 
-- [`pybind11`](https://github.com/pybind/pybind11)
-- [`XRoboRoolkit PC Service`](https://github.com/XR-Robotics/XRoboToolkit-PC-Service#)
+- Linux (x86_64 or aarch64, e.g. NVIDIA Orin) or Windows (x64), Python >= 3.10
+- A running [XRoboToolkit PC Service](https://github.com/XR-Robotics/XRoboToolkit-PC-Service) with a connected PICO headset (at runtime)
 
-## Building the Project
-### Ubuntu 22.04
+The prebuilt `PXREARobotSDK` binaries are vendored in `vendor/`, so no manual
+SDK download or build is needed.
 
+## Installation
+
+### From PyPI
+
+```bash
+uv add xrobotoolkit-sdk
+# or
+pip install xrobotoolkit-sdk
 ```
-conda remove --name xr --all
-conda create -n xr python=3.10
-conda activate xr
 
-mkdir -p tmp
-cd tmp
-git clone https://github.com/XR-Robotics/XRoboToolkit-PC-Service.git
-cd XRoboToolkit-PC-Service/RoboticsService/PXREARobotSDK 
-bash build.sh
-cd ../../../..
+### From source
 
-mkdir -p lib
-mkdir -p include
-cp tmp/XRoboToolkit-PC-Service/RoboticsService/PXREARobotSDK/PXREARobotSDK.h include/
-cp -r tmp/XRoboToolkit-PC-Service/RoboticsService/PXREARobotSDK/nlohmann include/nlohmann/
-cp tmp/XRoboToolkit-PC-Service/RoboticsService/PXREARobotSDK/build/libPXREARobotSDK.so lib/
-# rm -rf tmp
+If you do not have [uv](https://docs.astral.sh/uv/) installed, run:
 
-# Build the project
-conda install -c conda-forge pybind11
-
-pip uninstall -y xrobotoolkit_sdk
-python setup.py install
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
-### Linux Ubuntu 22.04 arm64 version (Nvidia orin supported)
-```
-bash setup_orin.sh
-```
-### Windows
 
-**Ensure pybind11 is installed before running the following command.**
+Then (requires a C++17 compiler; CMake >= 3.26 is downloaded automatically if
+not installed):
 
+```bash
+git clone https://github.com/XR-Robotics/XRoboToolkit-PC-Service-Pybind.git
+cd XRoboToolkit-PC-Service-Pybind
+uv sync
 ```
-setup_windows.bat
-```
+
+`uv sync` creates `.venv/` with any available Python >= 3.10 (pick one with
+e.g. `uv sync --python 3.12`), builds the extension, and installs the package
+into it. Run scripts with e.g. `uv run examples/example.py`.
+
+To build distributable artifacts locally: `uv build`. The extension is built
+against the CPython stable ABI, so the wheel (e.g.
+`xrobotoolkit_sdk-1.1.0-cp310-abi3-win_amd64.whl`) installs on any CPython
+>= 3.10 for the same OS and architecture, whichever Python version built it.
+Wheels for Linux/Windows are also built in CI via cibuildwheel, see
+`.github/workflows/wheels.yml`.
 
 ## Using the Python Bindings
 

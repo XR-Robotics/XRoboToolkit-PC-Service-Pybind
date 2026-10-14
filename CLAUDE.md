@@ -10,9 +10,9 @@ This project provides Python bindings for the XRoboToolkit PC Service SDK, enabl
 
 The project consists of:
 
-- **Core C++ Bindings** (`bindings/py_bindings.cpp`): Pybind11-based C++ module that wraps the PXREARobotSDK
+- **Core C++ Bindings** (`bindings/py_bindings.cpp`): C++ module written against the CPython Limited API (no pybind11, which cannot target it) that wraps the PXREARobotSDK
 - **SDK Integration**: Uses the XRoboToolkit-PC-Service SDK (cloned from external repository)
-- **Build System**: CMake-based build with Python setuptools integration
+- **Build System**: CMake-based build driven by scikit-build-core, producing abi3 wheels
 - **Multi-platform Support**: Linux (x86_64/aarch64) and Windows
 
 Key components:
@@ -23,40 +23,39 @@ Key components:
 
 ## Build Commands
 
-### Ubuntu/Linux Setup and Build
+The project is uv-first and uses scikit-build-core as its build backend.
+Prebuilt PXREARobotSDK binaries are vendored in `vendor/` (Linux x86_64,
+Linux aarch64, Windows amd64), so no SDK download or build step is needed.
+Building the extension is only possible on Linux and Windows; macOS is
+unsupported (no vendor binaries exist).
+
 ```bash
-# Full setup (downloads dependencies and builds)
-bash setup_ubuntu.sh
+# Create .venv (any Python >= 3.10; choose with --python 3.X), build and install the package
+uv sync
 
-# Manual build after setup
-python setup.py install
+# Run an example inside the project venv
+uv run examples/example.py
 
-# Clean build artifacts
-python setup.py clean
+# Build sdist + wheel (cp310-abi3: installs on any CPython >= 3.10)
+uv build
+
+# Check dist/ and upload it to PyPI (needs UV_PUBLISH_TOKEN; --test targets
+# TestPyPI, --dry-run only runs the checks)
+uv run scripts/publish.py
 ```
 
-### Windows Setup and Build
-```batch
-# Full setup (downloads dependencies and builds)
-setup_windows.bat
+The extension targets the CPython stable ABI (`wheel.py-api = "cp310"` in
+`pyproject.toml`), so one wheel per platform serves every CPython >= 3.10
+(not free-threaded builds) regardless of the Python that built it. Keep
+`py_bindings.cpp` within the 3.10 Limited API and check built wheels with
+`uvx abi3audit --strict dist/*.whl`. Do not use `PyArg_ParseTuple` `#`
+formats (`s#`, `y#`, ...): built against Python >= 3.13 headers they raise
+`SystemError` (PY_SSIZE_T_CLEAN) on Python 3.10-3.12, which abi3audit does not
+detect.
 
-# Manual build after setup
-python setup.py install
-```
-
-### Development Commands
-```bash
-# Uninstall existing package
-pip uninstall -y xrobotoolkit_sdk
-
-# Install pybind11 dependency
-conda install -c conda-forge pybind11
-# or
-pip install pybind11
-
-# Build and install
-python setup.py install
-```
+Release wheels are built by cibuildwheel in `.github/workflows/wheels.yml`
+(manylinux_2_34 for both Linux arches, dictated by the vendored libraries'
+glibc requirements — see `vendor/README.md`).
 
 ## Data Flow and Threading
 
@@ -84,13 +83,12 @@ The SDK uses a callback-based architecture:
 
 ## Dependencies
 
-### Required
-- pybind11 (Python binding framework)
-- CMake (build system)
-- XRoboToolkit-PC-Service SDK (automatically downloaded during setup)
+### Required (build time)
+- CMake >= 3.26 (FindPython stable-ABI support; downloaded automatically if missing) and a C++17 compiler
+- scikit-build-core (fetched automatically by uv/pip)
 
-### Platform-specific Libraries
-- Linux: `libPXREARobotSDK.so`
+### Platform-specific Libraries (vendored in `vendor/`)
+- Linux: `libPXREARobotSDK.so` (x86_64 and aarch64 variants)
 - Windows: `PXREARobotSDK.dll` and `PXREARobotSDK.lib`
 
 ## Testing
