@@ -50,6 +50,23 @@ Wheels for Linux/Windows are also built in CI via cibuildwheel, see
 
 ## Using the Python Bindings
 
+The existing getters keep their signatures and return shapes. An SDK
+`DeviceMissing` event clears values last written by that device; a service
+disconnect or `close()` clears all cached values. Late frames from a reported
+missing device are ignored until `DeviceFind`, and service frames are ignored
+until `ServerConnect`. Reconnect events alone do not restore old values.
+
+Controller or head payloads explicitly marked `valid: false` clear the
+corresponding pose (and controller buttons/axes), rather than caching their
+placeholder pose. Legacy payloads without `valid` are still accepted. Cleared
+poses contain seven zeros, including a zero quaternion, and are **unavailable
+data**, not a robot control target. A valid origin/identity pose is still accepted.
+
+This uses SDK-reported events, not a new timeout or pose-based disconnect
+heuristic. It does not select a headset or isolate simultaneous online devices.
+`DeviceMissing` reflects the PC Service's offline decision and may be delayed
+by its existing heartbeat policy.
+
 **1. Get Controller and Headset Poses**
 
 ```python

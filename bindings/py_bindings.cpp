@@ -11,6 +11,8 @@
 #include <type_traits>
 #include <vector>
 #include <array>
+#include <algorithm>
+#include <unordered_set>
 #include <nlohmann/json.hpp>
 #include "PXREARobotSDK.h"
 
@@ -71,6 +73,71 @@ std::mutex rightHandMutex;
 std::mutex bodyMutex;  // Mutex for body tracking data
 std::mutex motionMutex;
 
+// Serialize callbacks with cache invalidation, without holding this mutex
+// while SDK init/deinit may start or join callback threads.
+std::mutex callbackMutex;
+std::mutex sdkLifecycleMutex;
+bool initialized = false;
+bool serverDisconnected = false;
+std::unordered_set<std::string> missingDevices;
+
+enum CacheDomain { Left, Right, Head, Timestamp, LeftHand, RightHand, Body, Motion };
+// Ownership is only for clearing a disconnected device's values. This does
+// not select a device or change how frames from online devices are received.
+std::array<std::string, 8> cacheOwners;
+
+// Caller holds callbackMutex. Existing getter locks and return shapes stay.
+void clearCachedInput(const std::string* device = nullptr) {
+    std::scoped_lock lock(leftMutex, rightMutex, headsetPoseMutex, timestampMutex,
+                          leftHandMutex, rightHandMutex, bodyMutex, motionMutex);
+    auto clearDomain = [&](CacheDomain domain) {
+        if (device && cacheOwners[domain] != *device) {
+            return false;
+        }
+        cacheOwners[domain].clear();
+        return true;
+    };
+    if (clearDomain(Left)) {
+        LeftControllerPose = {};
+        LeftTrigger = LeftGrip = 0.0;
+        LeftAxis = {};
+        LeftMenuButton = LeftAxisClick = LeftPrimaryButton = LeftSecondaryButton = false;
+    }
+    if (clearDomain(Right)) {
+        RightControllerPose = {};
+        RightTrigger = RightGrip = 0.0;
+        RightAxis = {};
+        RightMenuButton = RightAxisClick = RightPrimaryButton = RightSecondaryButton = false;
+    }
+    if (clearDomain(Head)) HeadsetPose = {};
+    if (clearDomain(Timestamp)) TimeStampNs = 0;
+    if (clearDomain(LeftHand)) {
+        LeftHandTrackingState = {};
+        LeftHandScale = 1.0;
+        LeftHandIsActive = 0;
+    }
+    if (clearDomain(RightHand)) {
+        RightHandTrackingState = {};
+        RightHandScale = 1.0;
+        RightHandIsActive = 0;
+    }
+    if (clearDomain(Body)) {
+        BodyJointsPose = {};
+        BodyJointsVelocity = {};
+        BodyJointsAcceleration = {};
+        BodyJointsTimestamp = {};
+        BodyTimeStampNs = 0;
+        BodyDataAvailable = false;
+    }
+    if (clearDomain(Motion)) {
+        MotionTrackerPose = {};
+        MotionTrackerVelocity = {};
+        MotionTrackerAcceleration = {};
+        MotionTrackerSerialNumbers = {};
+        MotionTimeStampNs = 0;
+        NumMotionDataAvailable = 0;
+    }
+}
 
 
 std::array<double, 7> stringToPoseArray(const std::string& poseStr) {
@@ -97,26 +164,51 @@ std::array<double, 6> stringToVelocityArray(const std::string& velocityStr) {
 
 void OnPXREAClientCallback(void* context, PXREAClientCallbackType type, int status, void* userData)
 {
+    std::lock_guard<std::mutex> callbackLock(callbackMutex);
+    if (!initialized) {
+        return;
+    }
     switch (type)
     {
     case PXREAServerConnect:
+        serverDisconnected = false;
         std::cout << "server connect\n" << std::endl;
         break;
     case PXREAServerDisconnect:
+        serverDisconnected = true;
+        clearCachedInput();
         std::cout << "server disconnect\n" << std::endl;
         break;
     case PXREADeviceFind:
-        std::cout << "device found\n" << (const char*)userData << std::endl;
+        if (userData) {
+            missingDevices.erase(static_cast<const char*>(userData));
+        }
+        std::cout << "device found\n" << std::endl;
         break;
     case PXREADeviceMissing:
-        std::cout << "device missing\n" << (const char*)userData << std::endl;
+        if (userData) {
+            const std::string device(static_cast<const char*>(userData));
+            missingDevices.insert(device);
+            clearCachedInput(&device);
+        } else {
+            // Without an identity, conservatively invalidate all cached input.
+            clearCachedInput();
+        }
+        std::cout << "device missing\n" << std::endl;
         break;
     case PXREADeviceConnect:
         std::cout << "device connect\n" << (const char*)userData << status << std::endl;
         break;
-    case PXREADeviceStateJson:
+    case PXREADeviceStateJson: {
+        if (serverDisconnected || !userData) {
+            break;
+        }
         auto& dsj = *((PXREADevStateJson*)userData);
-        
+        const std::string device(dsj.devID,
+            std::find(std::begin(dsj.devID), std::end(dsj.devID), '\0'));
+        if (missingDevices.count(device)) {
+            break;  // A late frame cannot revive an SDK-reported offline device.
+        }
 
         try {
             json data = json::parse(dsj.stateJson);
@@ -126,48 +218,69 @@ void OnPXREAClientCallback(void* context, PXREAClientCallbackType type, int stat
                     auto& left = value["Controller"]["left"];
                     {
                         std::lock_guard<std::mutex> lock(leftMutex);
-                        LeftControllerPose = stringToPoseArray(left["pose"].get<std::string>());
-                        LeftTrigger = left["trigger"].get<double>();
-                        LeftGrip = left["grip"].get<double>();
-                        LeftMenuButton = left["menuButton"].get<bool>();
-                        LeftAxis[0] = left["axisX"].get<double>();
-                        LeftAxis[1] = left["axisY"].get<double>();
-                        LeftAxisClick = left["axisClick"].get<bool>();
-                        LeftPrimaryButton = left["primaryButton"].get<bool>();
-                        LeftSecondaryButton = left["secondaryButton"].get<bool>();
+                        cacheOwners[Left] = device;
+                        if (left.contains("valid") && !left.at("valid").get<bool>()) {
+                            LeftControllerPose = {};
+                            LeftTrigger = LeftGrip = 0.0;
+                            LeftAxis = {};
+                            LeftMenuButton = LeftAxisClick = LeftPrimaryButton = LeftSecondaryButton = false;
+                        } else {
+                            LeftControllerPose = stringToPoseArray(left["pose"].get<std::string>());
+                            LeftTrigger = left["trigger"].get<double>();
+                            LeftGrip = left["grip"].get<double>();
+                            LeftMenuButton = left["menuButton"].get<bool>();
+                            LeftAxis[0] = left["axisX"].get<double>();
+                            LeftAxis[1] = left["axisY"].get<double>();
+                            LeftAxisClick = left["axisClick"].get<bool>();
+                            LeftPrimaryButton = left["primaryButton"].get<bool>();
+                            LeftSecondaryButton = left["secondaryButton"].get<bool>();
+                        }
                     }
                 }
                 if (value["Controller"].contains("right")) {
                     auto& right = value["Controller"]["right"];
                     {
                         std::lock_guard<std::mutex> lock(rightMutex);
-                        RightControllerPose = stringToPoseArray(right["pose"].get<std::string>());
-                        RightTrigger = right["trigger"].get<double>();
-                        RightGrip = right["grip"].get<double>();
-                        RightMenuButton = right["menuButton"].get<bool>();
-                        RightAxis[0] = right["axisX"].get<double>();
-                        RightAxis[1] = right["axisY"].get<double>();
-                        RightAxisClick = right["axisClick"].get<bool>();
-                        RightPrimaryButton = right["primaryButton"].get<bool>();
-                        RightSecondaryButton = right["secondaryButton"].get<bool>();
+                        cacheOwners[Right] = device;
+                        if (right.contains("valid") && !right.at("valid").get<bool>()) {
+                            RightControllerPose = {};
+                            RightTrigger = RightGrip = 0.0;
+                            RightAxis = {};
+                            RightMenuButton = RightAxisClick = RightPrimaryButton = RightSecondaryButton = false;
+                        } else {
+                            RightControllerPose = stringToPoseArray(right["pose"].get<std::string>());
+                            RightTrigger = right["trigger"].get<double>();
+                            RightGrip = right["grip"].get<double>();
+                            RightMenuButton = right["menuButton"].get<bool>();
+                            RightAxis[0] = right["axisX"].get<double>();
+                            RightAxis[1] = right["axisY"].get<double>();
+                            RightAxisClick = right["axisClick"].get<bool>();
+                            RightPrimaryButton = right["primaryButton"].get<bool>();
+                            RightSecondaryButton = right["secondaryButton"].get<bool>();
+                        }
                     }
                 }
                 if (value.contains("Head")) {
                     auto& headset = value["Head"];
                     {
                         std::lock_guard<std::mutex> lock(headsetPoseMutex);
-                        HeadsetPose = stringToPoseArray(headset["pose"].get<std::string>());
+                        cacheOwners[Head] = device;
+                        HeadsetPose = headset.contains("valid") && !headset.at("valid").get<bool>()
+                            ? std::array<double, 7>{}
+                            : stringToPoseArray(headset["pose"].get<std::string>());
                     }
                 }
                 if (value.contains("timeStampNs")) {
                     std::lock_guard<std::mutex> lock(timestampMutex);
+                    cacheOwners[Timestamp] = device;
                     TimeStampNs = value["timeStampNs"].get<int64_t>();
                 }
                 if (value["Hand"].contains("leftHand")) {
                     auto& leftHand = value["Hand"]["leftHand"];
                     {
                         std::lock_guard<std::mutex> lock(leftHandMutex);
-                        
+                        cacheOwners[LeftHand] = device;
+
                         LeftHandScale = leftHand["scale"].get<double>();
                         LeftHandIsActive = leftHand["isActive"].get<int>();
                         for (int i = 0; i < 26; i++) {
@@ -179,6 +292,7 @@ void OnPXREAClientCallback(void* context, PXREAClientCallbackType type, int stat
                     auto& rightHand = value["Hand"]["rightHand"];
                     {
                         std::lock_guard<std::mutex> lock(rightHandMutex);
+                        cacheOwners[RightHand] = device;
                         RightHandScale = rightHand["scale"].get<double>();
                         RightHandIsActive = rightHand["isActive"].get<int>();
                         for (int i = 0; i < 26; i++) {
@@ -191,39 +305,40 @@ void OnPXREAClientCallback(void* context, PXREAClientCallbackType type, int stat
                     auto& body = value["Body"];
                     {
                         std::lock_guard<std::mutex> lock(bodyMutex);
-                        
+                        cacheOwners[Body] = device;
+
                         if (body.contains("timeStampNs")) {
                             BodyTimeStampNs = body["timeStampNs"].get<int64_t>();
                         }
-                        
+
                         if (body.contains("joints") && body["joints"].is_array()) {
                             auto joints = body["joints"];
                             int jointCount = std::min(static_cast<int>(joints.size()), 24);
-                            
+
                             for (int i = 0; i < jointCount; i++) {
                                 auto& joint = joints[i];
-                                
+
                                 // Parse pose (position and rotation)
                                 if (joint.contains("p")) {
                                     BodyJointsPose[i] = stringToPoseArray(joint["p"].get<std::string>());
                                 }
-                                
+
                                 // Parse velocity and angular velocity
                                 if (joint.contains("va")) {
                                     BodyJointsVelocity[i] = stringToVelocityArray(joint["va"].get<std::string>());
                                 }
-                                
+
                                 // Parse acceleration and angular acceleration
                                 if (joint.contains("wva")) {
                                     BodyJointsAcceleration[i] = stringToVelocityArray(joint["wva"].get<std::string>());
                                 }
-                                
+
                                 // Parse IMU timestamp
                                 if (joint.contains("t")) {
                                     BodyJointsTimestamp[i] = joint["t"].get<int64_t>();
                                 }
                             }
-                            
+
                             BodyDataAvailable = true;
                         }
                     }
@@ -233,6 +348,7 @@ void OnPXREAClientCallback(void* context, PXREAClientCallbackType type, int stat
                     auto& motion = value["Motion"];
                     {
                         std::lock_guard<std::mutex> lock(motionMutex);
+                        cacheOwners[Motion] = device;
                         if (motion.contains("timeStampNs")) {
                             MotionTimeStampNs = motion["timeStampNs"].get<int64_t>();
                         }
@@ -272,16 +388,42 @@ void OnPXREAClientCallback(void* context, PXREAClientCallbackType type, int stat
         }
             break;
     }
+    }
 }
 
 void init() {
+    std::lock_guard<std::mutex> sdkLock(sdkLifecycleMutex);
+    {
+        std::lock_guard<std::mutex> lock(callbackMutex);
+        if (initialized) {
+            throw std::runtime_error("PXREARobot SDK is already initialized");
+        }
+        clearCachedInput();
+        missingDevices.clear();
+        serverDisconnected = false;
+        initialized = true;
+    }
     if (PXREAInit(NULL, OnPXREAClientCallback, PXREAFullMask) != 0) {
+        std::lock_guard<std::mutex> lock(callbackMutex);
+        initialized = false;
+        clearCachedInput();
         throw std::runtime_error("PXREAInit failed");
     }
 }
 
 void deinit() {
-    PXREADeinit();
+    std::lock_guard<std::mutex> sdkLock(sdkLifecycleMutex);
+    bool wasInitialized;
+    {
+        std::lock_guard<std::mutex> lock(callbackMutex);
+        wasInitialized = initialized;
+        initialized = false;
+        clearCachedInput();
+        missingDevices.clear();
+    }
+    if (wasInitialized) {
+        PXREADeinit();
+    }
 }
 
 std::array<double, 7> getLeftControllerPose() {
